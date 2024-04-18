@@ -1,0 +1,514 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+    toc : true
+    toc_float : true
+    toc_depth : 3
+---
+
+| Source utlisées | 
+|---------------|
+|https://archive.ics.uci.edu/dataset/890/aids+clinical+trials+group+study+175|
+|https://epirhandbook.com/fr/survival_analysis.html|
+|https://jonathanlenoir.files.wordpress.com/2013/12/analyse-de-survie-cox.pdf| 
+|https://rviews.rstudio.com/2017/09/25/survival-analysis-with-r/|
+|https://www.youtube.com/watch?v=M1QQ8QQn8Zs |
+|http://www.sthda.com/english/wiki/cox-model-assumptions |
+|https://argoshare.is.ed.ac.uk/healthyr_book/solutions-4.html|
+| https://helios2.mi.parisdescartes.fr/~obouaziz/CoxSurv.pdf|
+ 
+ 
+## Contexte :
+
+Etude randomisé sur des patients atteint du sida 
+
+### Problématique :
+Existe-t'il une différence entre les différents types de traitements pour lutter contre le sida ?   
+
+
+
+ 
+```{r include=FALSE}
+# Importation des bibliothèques
+library(survival)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(KMsurv)
+library(prodlim)
+library(pec)
+library(rms)
+library(Publish)
+library(corrplot)
+```
+
+
+
+# Importation des données 
+
+```{r}
+wd <- getwd()
+file <- "aids.csv"
+data <- read.csv(file)
+head(data)
+
+var_quali <- c("trt","hemo","homo","drugs","oprior","z30","race","gender","str2","strat","symptom","treat","offtrt","zprior")
+data[var_quali] <- lapply(data[var_quali], as.factor)
+
+```
+
+| Variable Name | Role    | Type       | Demographic               | Description                                  | Units              | Missing Values |
+|---------------|---------|------------|---------------------------|----------------------------------------------|--------------------|----------------|
+| pidnum        | ID      | Integer    | Patient ID                |                                              |                    | no             |
+| cid           | Target  | Binary     | censoring indicator       | (1 = failure, 0 = censoring)                 |                    | no             |
+| time          | Feature | Integer    | time to failure or censoring |                                          |                    | no             |
+| trt           | Feature | Integer    | treatment indicator       | (0 = ZDV only; 1 = ZDV + ddI, 2 = ZDV + Zal, 3 = ddI only) |                 | no             |
+| age           | Feature | Integer    | Age                       | age (yrs) at baseline                        |                    | no             |
+| wtkg          | Feature | Continuous | weight                    | (kg) at baseline                             |                    | no             |
+| hemo          | Feature | Binary     | hemophilia                | (0=no, 1=yes)                                |                    | no             |
+| homo          | Feature | Binary     | Sexual Orientation        | homosexual activity (0=no, 1=yes)            |                    | no             |
+| drugs         | Feature | Binary     | history of IV drug use     | (0=no, 1=yes)                                |                    | no             |
+| karnof        | Feature | Integer    | Karnofsky score            | (on a scale of 0-100)                       |                    | no             |
+| oprior        | Feature | Binary     | Non-ZDV antiretroviral therapy pre-175 | (0=no, 1=yes)                          |                    | no             |
+| z30           | Feature | Binary     | ZDV in the 30 days prior to 175 | (0=no, 1=yes)                            |                    | no             |
+| zprior        | Feature | Binary     | ZDV prior to 175           | (0=no, 1=yes)                               |                    | no             |
+| preanti       | Feature | Integer    | # days pre-175 anti-retroviral therapy |                                       |                    | no             |
+| race          | Feature | Integer    | Race                      | race (0=White, 1=non-white)                 |                    | no             |
+| gender        | Feature | Binary     | Gender                    | gender (0=F, 1=M)                           |                    | no             |
+| str2          | Feature | Binary     | antiretroviral history     | (0=naive, 1=experienced)                     |                    | no             |
+| strat         | Feature | Integer    | antiretroviral history stratification | (1='Antiretroviral Naive',2='> 1 but <= 52 weeks of prior antiretroviral therapy',3='> 52 weeks) | no | no             |
+| symptom       | Feature | Binary     | symptomatic indicator      | (0=asymp, 1=symp)                           |                    | no             |
+| treat         | Feature | Binary     | treatment indicator        | (0=ZDV only, 1=others)                       |                    | no             |
+| offtrt        | Feature | Binary     | indicator of off-trt before 96+/-5 weeks | (0=no,1=yes)                               |                    | no             |
+| cd40          | Feature | Integer    | CD4 at baseline            |                                              |                    | no             |
+| cd420         | Feature | Integer    | CD4 at 20+/-5 weeks        |                                              |                    | no             |
+| cd80          | Feature | Integer    | CD8 at baseline            |                                              |                    | no             |
+| cd820         | Feature | Integer    | CD8 at 20+/-5 weeks        |                                              |                    | no             |
+
+
+
+## Vérifier la présence de données manquantes
+```{r}
+colSums(is.na(data))
+```
+Le jeu de données ne présentent pas de données manquantes. 
+
+# Taux de censure
+```{r}
+## 
+taux_censure <- round(sum(data$cid == 0) / nrow(data),2)
+print(taux_censure)
+
+```
+Le taux de censure de ce jeu de données est de 76%, c'est à dire que 76% des individus ne sont pas décédés. Les 24% restant le sont. 
+Ce taux de censure étant assez élevé, il sera nécessaire de vérifier par la suite la robustesse de notre modèle de Cox. 
+
+
+# Analyse univariée 
+## Variables numériques
+### Résumé statistiques
+```{r}
+# Résumé des variables numériques
+summary(data[, c("age", "wtkg", "karnof", "preanti", "cd40", "cd420", "cd80", "cd820")])
+
+```
+*Age* :
+Les individus dans le jeu de données ont un âge compris entre 12 et 70 ans.
+La plupart des individus semblent être âgés entre 29 et 40 ans.
+
+*Poids (wtkg)* :
+Le poids varie entre 31 kg et 159.94 kg.
+La médiane du poids est d'environ 74.39 kg.
+
+*Score de Karnofsky (karnof)* :
+Le score de Karnofsky varie entre 70 et 100.
+La médiane est de 100, suggérant que la plupart des individus ont un score de Karnofsky assez élevé, ce qui peut indiquer un bon état de santé.
+Il pourrait être intéressant de créer des classes
+
+
+*Concentration d'anticorps préexistants (preanti)* :
+Les concentrations d'anticorps préexistants varient de 0 à 2851.
+Il y a une variabilité importante dans les concentrations d'anticorps.
+
+*Marqueur CD40 (cd40)* :
+Les valeurs du marqueur CD40 varient de 0 à 1199.
+La médiane se situe autour de 340.
+
+*Marqueur CD420 (cd420)* :
+Les valeurs du marqueur CD420 varient de 0 à 1119.
+La médiane est d'environ 353.
+
+*Marqueur CD80 (cd80)* :
+Les valeurs du marqueur CD80 varient de 40 à 986.6.
+La médiane se situe autour de 371.3.
+
+*Marqueur CD820 (cd820)* :
+Les valeurs du marqueur CD820 varient de 124 à 6035.
+La médiane est d'environ 865
+
+### Distribution
+
+```{r}
+# Histogramme pour les variables numériques
+
+par(mfrow=c(2, 3))  # Répartit la disposition des graphiques en 2x3
+hist(data$age, main="Histogramme de l'âge", xlab="Âge (années)", col="lightblue")
+hist(data$wtkg, main="Histogramme du poids", xlab="Poids (kg)", col="lightgreen")
+hist(data$karnof, main="Histogramme du score de Karnofsky", xlab="Score de Karnofsky", col="lightcoral")
+hist(data$cd40, main="Histogramme de CD40", xlab="CD4", col="lightpink")
+hist(data$cd80, main="Histogramme de CD80", xlab="CD80", col="lightyellow")
+hist(data$cd420, main="Histogramme de CD420", xlab="CD420", col="lightskyblue")
+hist(data$cd820, main="Histogramme de CD820", xlab="CD820", col="lightgrey")
+```
+
+
+# Suppression de zprior 
+```{r}
+data <- subset(data, select = -zprior)
+```
+
+
+# Kaplan-Meier 
+
+Kaplan-Meier est une méthode d'estimation de la fonction de Survie.
+La fonction de survie **S(t)** représente la probabilité qu'un évènement, ici le décès du patient arrive après un temps donné *t*. Autrement dit, la courbe de Survie permet d'estimer le temps pour un patient de vivre après le diagnostic de sa maladie, ou du début de l'étude. 
+
+Nous pouvons donc la noter comme ceci : 
+$$ S(t) = P(T > t) $$
+
+Kaplan-Meier reste cependant une approximation de la courbe de Survie. 
+  
+
+```{r}
+km_global <- survfit(Surv(time, cid) ~ 1, data = data)
+#options(max.print = 2500) 
+#summary(km_global)
+
+ggsurvplot(km_global, risk.table = T, data = data, title='Courbe de Kaplan Meier - survie globale des patients')
+```
+
+Ce graphique représente la courbe de survie de Kaplan-Meier, cette courbe permet de suivre l'évolution de la probabilité de survie de nos individus, nous pouvons voir qu'au temps 0, 2139 individus sont "à risque". A la fin de l'étude, au temps 1200, ils ne sont plus que 20. 
+Les "marques" sur la courbe représente les individus censurés. 
+Nous pouvons voir qu'entre le temps 0 et le temps 1200 la probabilité de survie a diminué de près de 28%.
+
+Nous ne pouvons pas calculer de médiane de survie car moins de la moitié des individus sont décédés dans le cas de l'étude. 
+
+
+
+## Courbe de survie de Kaplan-Meier en fonction du traitement (treat)
+
+```{r}
+km_trt <- survfit(Surv(time, cid) ~ treat, data = data)
+km_trt
+
+ggsurvplot(km_trt, conf.int = F, risk.table = FALSE, pval = TRUE, tables.height = 0,title='KM - Survie en fonction du traitement (treat)', data = data) 
+ggsurvplot(km_trt, conf.int = F, risk.table = TRUE, pval = TRUE, tables.height = 1, data = data)
+
+
+
+```
+
+```{r}
+library(survival)
+library(survminer)
+
+# Supposons que vous ayez déjà créé le graphique avec ggsurvplot
+km_trt <- survfit(Surv(time, cid) ~ treat, data = data)
+plot <- ggsurvplot(km_trt, conf.int = FALSE, risk.table = F, pval = TRUE, tables.height = 0, data = data) 
+
+# Modifiez la légende en utilisant la fonction labs()
+plot <- plot + labs(title = 'KM - Survie en fonction du traitement (treat)',
+                    
+                    caption = 'treat0 = Zidovudine only, treat1 = Zidovudine + others',
+                    x = 'Temps',
+                    y = 'Survie')
+
+# Affichez le graphique modifié
+print(plot)
+
+```
+
+Ici, nous pouvons voir la différence entre les courbes de survie pour les individus ayant reçu le traitement contenant du ZDV uniquement et ceux ayant reçu du ZDV avec d'autres composants. 
+
+La courbe bleu représentant les individus avec un traitement ZDV+autres suggère une meilleure probabilité de survie pour comparé aux autres. 
+
+Nous voyons également que les courbes ne se croisent pas, ce qui suggère qu'il y a proportionalité des risques. 
+
+```{r}
+km_offtrt <- survfit(Surv(time, cid) ~ offtrt, data = data)
+km_offtrt
+
+ggsurvplot(km_offtrt, conf.int = F, risk.table = FALSE, pval = TRUE, tables.height = 0,title='KM - Survie en fonction de offtrt', data = data) 
+ggsurvplot(km_offtrt, conf.int = F, risk.table = TRUE, pval = TRUE, tables.height = 1, data = data)
+
+```
+
+## Test du logrank
+
+Le test du logrank permet de comparer deux ou plusieurs courbes de survie. 
+De cette façon nous pouvons déterminer si la différence entre les courbes sont statistiquement significatives et pas juste dûes au hasard. 
+
+Nous devons formaliser nos hypothèses 
+H0 : Egalité des fonctions de survie dans les deux groupes 
+
+$$ S(t)_a = S(t)_b $$
+
+H1 : Pas d'égalité des fonctions de survie entre les deux groupes
+
+$$ S(t)_a \neq S(t)_b $$
+
+
+Si cette hypothèse est vraie alors les deux courbes proviennent de la même distribution et un simple changement de l'effectif permettrait de le constater graphiquement.
+
+En revanche si cette hypothèse est fausse alors elles proviennent de distributions différentes.
+
+Le test du logrank permet alors de calculer la probabilité d'observer ces courbes sous l'hypothèse nulle. C'est à dire avec quelle probabilité est-il possible de retrouver les différences entre les courbes sachant qu'elles proviennent de la même distribution. Cette probabilité est appelée p-valeur, si elle est petite (p < 0.05) alors on se tourne vers l'hypothèse alternative H1, les deux courbes ne proviennent pas de la même distribution mais bien de deux distributions significativement différentes.
+Si elle est grande (p > 0.05) alors on ne rejète pas H0. 
+
+```{r}
+survdiff(Surv(time, cid) ~ treat, data = data)
+
+```
+
+La p-value observée étant de l'ordre de 5e-12, nous pouvons dire que le test est significatif au seuil de 1% et rejeter H0. Ainsi il y a une différence entre les groupes ayant reçu le traitement contenant du ZDV uniquement et ceux ayant reçu un traitement composé de ZDV et d'un autre composant.  
+
+
+
+# Modèle de Cox
+
+Le modèle de Cox permet d'évaluer l'effet de différentes variables sur la durée de survie.
+
+Les variables explicatives doivent être indépendantes
+Les risques doivent être proportionnels 
+
+```{r eval=FALSE, include=FALSE}
+for (var in var_quali) {
+  table_cross <- table(data$cid, data[[var]])
+  chi2_result <- chisq.test(table_cross, correct = TRUE)
+  
+  # Afficher les résultats
+  cat("Variable:", var, "\n")
+  cat("Chi-squared:", chi2_result$statistic, "\n")
+  cat("Degrees of Freedom:", chi2_result$parameter, "\n")
+  cat("P-value:", chi2_result$p.value, "\n")
+  
+
+  if (chi2_result$p.value < 0.05) {
+    cat("Résultat: Rejet H0\n")
+  } else {
+    cat("Résultat: Acceptation H0\n")
+  }
+  cat("\n")
+}
+
+```
+
+```{r}
+data$scaledAge    <- scale(data$age)
+data$scaledcd40   <- scale(data$cd40)
+data$scaledWtkg   <- scale(data$wtkg)
+data$scaledKarnof <- scale(data$karnof)
+data$scaledcd80   <- scale(data$cd80)
+```
+
+
+## Modèle CoxPH avec toutes les variables
+
+Toutes les variables sauf str2, cd420, cd820 sont incluses dans le modèle.
+Ces variables sont écartées car redondantes ou trop corrélée à une autre. 
+
+```{r}
+names(data)
+cox_model <- coxph(Surv(time, cid) ~  scaledAge + scaledWtkg + hemo+ treat + homo + drugs + scaledKarnof+ z30  + race + gender + symptom + oprior + scaledcd40+ scaledcd80 + strat + offtrt ,data = data)
+```
+
+
+
+```{r}
+summary(cox_model)
+```
+Le modèle est significatif, la pvalue de 2e-16 au test de vraisemblance indique que notre modèle est meilleur que le modèle nul (sans variable)
+On remarque aussi que l'indicateur Concordance est de 0.71, cet indicateur varie entre 0 et 1, plus il est élevé,  plus le modèle est "bon". 
+Cet indicateur est calculé à partir des résultats attendus du modèle, pour 2 individus donnés le modèle s'attends à ce qu'un subisse la variable d'intérêt avant l'autre.
+Si l'indicateur avait pour valeur 0.5, le modèle ne serait pas meilleur que le hasard. 
+
+
+```{r}
+publish(cox_model)
+```
+Dans ce premier modèle avec toutes les variables, on observe que les variables significatives (celles dont le coefficient est significativement différent de 0) pour le modèle au seuil de 1% sont : **treat1**,**cd40**, **cd80**, **symptom1**, **karnof**, **drugs** et **offtrt**.
+
+
+
+
+
+### Analyses des HR 
+
+La modalité 1 de la variable *treat* est protectrice (HR<1).
+Nous pouvons dire que les individus ayant reçu un traitement avec ZDV+un autre composant ont 47% (1-0.53) chance de moins de mourir par rapport aux individus ayant reçu un traitement contenant que du ZDV. 
+
+Le facteur aggravant les risques de mortalités est la modalité 1 de la variable symptom, en effet un individu avec une présence de symptomes a 43% de chance de plus de décéder du SIDA. 
+Bien que significatives au seuil de 1% les variables *cd40* et *cd80* sont sans effet car HR=1. 
+
+
+
+| Variable       | HR              | p-value  | effet |
+| -------------- | --------------- | -------- |--------|
+| treat (1 vs 0) | 0.53 [0.44;0.63] | < 0.001  | réduction du risque de 47%|
+| drugs (1 vs 0) | 0.65 [0.48;0.88] | 0.00502  | réduction du risque de 35% |
+| scaledKarnof   | 0.89 [0.82;0.97] | 0.00518  | réduction du risque de 11%|
+| symptom (1 vs 0)| 1.43 [1.17;1.75]| < 0.001  | augmentation du risque de 43%|
+| scaledcd40     | 0.65 [0.58;0.72]| < 0.001  | réduction du risque de 35%|
+| scaledcd80     | 1.24 [1.14;1.34]| < 0.001  | augmentation du risque de 24%|
+| offtrt (1 vs 0)| 1.90 [1.59;2.28]| < 0.001  | augmentation du risque de 90%|
+
+
+
+## Analyses des résidus du modèle
+
+
+
+Nous regarderons si l'hypothèse principale, celle de la proportionalité des risques est respectée.
+Pour cela nous utiliserons la fonction cox.zph() permettant d'effectuer un test sur les variables du modèle. 
+Cette fonction utilise les résidus de Schoenfeld.
+Si les risques sont bien proportionnels, nous ne devrions pas voir de motif dans les résidus. 
+
+Le test formalise deux hypothèses : 
+
+H0 : les risques sont proportionnels
+H1 : les risques ne sont pas proportionnels 
+
+Si la pvaleur est inférieure au seuil de 0.05 alors le test est significatif et l'hypothèse de proportionnalité des risques est violée, on rejette H0.
+Sinon on ne rejette pas H0. 
+
+## Linéarité des résidus 
+```{r}
+test.ph <- cox.zph(cox_model)
+test.ph
+plot(test.ph)
+```
+D'après les résultats du test, la p-value étant inférieur à 0.05, nous pouvons dire que l'hypothèse de la proportionnalité des risques est violée. 
+
+
+ 
+```{r}
+km_treat <- survfit(Surv(time, cid) ~ treat , data = data)
+
+
+plot(km_treat, fun = "cloglog", xlab = "Time (in days) using log",
+     ylab = "log-log survival", main = "log-log courbes par treat") 
+```
+
+Une autre méthode repose sur la représentation des courbes de survies en utilisant log(-log). Nous cherchons ici à voir des courbes parréllèles pour que l'hypothèse de la proportionnalité des risques ne soit pas rejetée graphiquement. Cela ne semble pas être le cas ici comme nous l'avons vu avec le test coxzph.  (méthode applicable avec les variables catégorielles uniquement)
+
+### Influence des outliers 
+
+Il est également possible de vérifier les valeurs aberrantes en visualisant les résidus de déviance. Le résidu de déviance est une transformation normalisée du résidu martingale. Ces résidus devraient être approximativement répartis symétriquement autour de zéro avec un écart-type de 1.
+
+-Les valeurs positives correspondent à des individus qui "sont décédés trop tôt" par rapport aux temps de survie attendus.
+-Les valeurs négatives correspondent à des individus qui "ont vécu trop longtemps".
+-Les valeurs très grandes ou très petites sont des valeurs aberrantes, mal prédites par le modèle.
+Cette visualisation permet d'identifier les observations qui ne sont pas bien prédites par le modèle, ce qui peut indiquer des anomalies ou des valeurs aberrantes dans les données. Vous pouvez utiliser des graphiques tels que des histogrammes ou des diagrammes en boîte pour évaluer la distribution des résidus de déviance et détecter d'éventuelles valeurs aberrantes. (http://www.sthda.com/english/wiki/cox-model-assumptions#testing-influential-observations)
+
+```{r}
+ggcoxdiagnostics(cox_model, type = "deviance",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+
+```
+
+Nous constatons ici un  écart entre les pointillés rouge et les pointillés bleus suggérant la présence d'outliers influents sur la qualité du modèle.
+
+
+
+
+
+
+## Discussion sur selectCox
+
+La fonction selectCox peut être utilisée pour sélectionner les variables dans le modèle selon le critère d'AIC (aikaike).
+Cette fonctionne utilise la méthode backward par défaut, c'est à dire qu'un modèle complet sera établi en premier lieu, puis il y aura une itération sur ce dernier en retirant les variables une à une de sorte à minimiser l'AIC. 
+A partir du moment où la valeur de ce critère remonte ou se stabilise, l'itération s'arrête et le modèle est construit. 
+
+
+```{r}
+xname <- names(data)
+xname <- xname[!xname %in% c("time", "cid", "trt","zprior","age","wtkg","cd40","cd80","karnof","strat","preanti","cd420","cd820")]
+model1 <- as.formula(paste("Surv(time, cid) ~ ", paste(xname, collapse = "+")))
+
+
+fitcox <- selectCox(model1, data = data) # utilise fastbw -> cherche le modèle qui minimise l'AIC par défaut 
+
+
+covnames<-fitcox$In
+model_In<-as.formula(paste("Surv(time,cid)~",paste(covnames,collapse="+")))
+
+finalCox<-coxph(model_In,data=data)
+summary(finalCox)
+publish(finalCox)
+
+```
+
+Je ne souhaite pas particulièrement utiliser cette méthode car je ne suis pas capable de dire si des variables importantes bien que non significatives soient écartées du modèle. De plus, les coefficients changent et l'effet des variables également, je risque de sous-estimer ou de surestimer l'effet du traitement. 
+Dans le cas de notre analyse, *treat* a un HR de 0.61, le traitement à base de ZDV+autres composants augmenterait les chances de survie de 39% dans ce modèle. 
+L'écart de 10% par rapport au premier modèle n'est pas négligeable. Par ailleurs, les effets des autres variables semblent masqués.  
+
+
+```{r}
+cox.zph(finalCox)
+```
+
+
+```{r}
+model2 <- coxph(Surv(time, cid) ~ z30+strata(symptom)+treat+strata(offtrt)+scaledKarnof+scaledcd80 ,data = data)
+summary(model2)
+publish(model2)
+```
+
+```{r}
+cox.zph(model2)
+```
+
+```{r}
+model3 <- coxph(Surv(time, cid) ~ strata(symptom)+treat+scaledKarnof+scaledcd80 ,data = data)
+summary(model3)
+publish(model3)
+cox.zph(model3)
+```
+```{r}
+model4 <- coxph(Surv(time, cid) ~ strata(symptom)+treat*offtrt+scaledKarnof+scaledcd80 ,data = data)
+summary(model4)
+publish(model4)
+cox.zph(model4)
+```
+
+
+```{r}
+out<-timereg::timecox(survival::Surv(time/365,cid==1)~treat+symptom,
+data=data)
+summary(out)
+
+plot(out)
+```
+
+Si je comprends bien ce graphique, il semblerait que l'effet du traitement soit bien lié au temps étant donné que le coefficient diminue avec ce dernier. 
+
+
+```{r}
+data$cd40new <- cut(data$cd40, breaks = c(-Inf, 500, Inf), labels = c("0", "1"))
+data$cd40new <- as.factor(data$cd40new)
+```
+
+
+
+```{r}
+summary(cox_model)
+```
+
+```{r}
+survival::cox.zph(cox_model)
+```
+Bien que la variable *treat* viole toujours l'hypothèse de la proportionnalité des risques, le modèle globale semble lui passer le temps avec une pvaleur > 0.05. 
+
+
